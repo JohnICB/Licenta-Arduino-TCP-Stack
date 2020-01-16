@@ -8,7 +8,6 @@ const unsigned int decisiveBitPosition = floor((RECEIVE_SUBSAMPLING_RATIO * 80) 
 const char payloadToSend = '*'; // d42	0b 0010 1010
 
 bool isStartBitSent;   // make static
-bool sentSignal;       // make static
 bool receivedSignal;   // make static
 bool flagEndOfMessage; // make static
 
@@ -29,7 +28,6 @@ void setup()
   isStartBitSent = false;
   flagEndOfMessage = false;
 
-  sentSignal = 0;
   receivedSignal = 0;
 
   for (int i = 0; i < RECEIVE_SUBSAMPLING_RATIO; i++)
@@ -51,91 +49,102 @@ void loop()
   }
 }
 
+void sendEndBit(int *iterationsToSkip)
+{
+  digitalWrite(OUTPUT_PIN, HIGH);
+
+  *iterationsToSkip = 5;
+  *flagEndOfMessage = true;
+
+  Serial.print("\nSent end bit\n");
+}
+
+void sendStartBit(bool *flagEndOfMessage)
+{
+  digitalWrite(OUTPUT_PIN, HIGH);
+
+  Serial.print("Sent start bit\n");
+}
+
+void sendNextBit(bool *isStartBitSent, unsigned int *bitIndex, bool *flagEndOfMessage)
+{
+  *isStartBitSent = false;
+
+  const bool signalToSend = (payloadToSend >> *bitIndex) & 1; // what bit to send
+
+  digitalWrite(OUTPUT_PIN, signalToSend);
+
+  *bitIndex++; // = (*bitIndex + 1) % (MESSAGE_BIT_LENGTH - 1);
+
+  if (*bitIndex == MESSAGE_BIT_LENGTH)
+  {
+    *bitIndex = 0;
+    *flagEndOfMessage = true; // if we finished transferring the bits from the character flag it so we send start bit again when we send the next message
+  }
+
+  // if (signalToSend)
+  //   Serial.print("Sending 1\n");
+  // else
+  //   Serial.print("Sending 0\n");
+
+  // if (*flagEndOfMessage)
+  // Serial.print("****\n");
+}
+
 void handleTx()
 {
   static unsigned int callIteration = 0;
   static unsigned int bitIndex = 0;
   static unsigned int iterationsToSkip = 0;
 
-  if (callIteration < RECEIVE_SUBSAMPLING_RATIO) // send next signal when the time has come - - - - - now 0 - - - - - now 1 - - - - - where - is a skipped iteration but rx is happening
-  {
-    callIteration++;
-    return;
-  }
+  static bool flagEndOfMessage = false;
 
-  callIteration = callIteration % RECEIVE_SUBSAMPLING_RATIO;
+  callIteration++;
+
+  if (callIteration < RECEIVE_SUBSAMPLING_RATIO) // send next signal when the time has come - - - - - now 0 - - - - - now 1 - - - - - where - is a skipped iteration but rx is happening
+    return;
+
+  callIteration = 0;
 
   if (flagEndOfMessage)
   {
-    digitalWrite(OUTPUT_PIN, HIGH);
-
     flagEndOfMessage = false;
-    iterationsToSkip = 5;
-
-    Serial.print("\nSent end bit\n");
-
-    return;
+    return sendEndBit(&iterationsToSkip);
   }
 
-  if (iterationsToSkip > 0)
-  {
-    digitalWrite(OUTPUT_PIN, LOW);
-    iterationsToSkip--;
+  /* 
+   if (iterationsToSkip > 0)
+    // {
+    //   digitalWrite(OUTPUT_PIN, LOW);
+    //   iterationsToSkip--;
 
-    // Serial.print(iterationsToSkip);
-    // Serial.print(" Skipped sending\n");
+    //   // Serial.print(iterationsToSkip);
+    //   // Serial.print(" Skipped sending\n");
 
-    return;
-  }
+    //   return;
+    // 
+  */
 
   if (bitIndex == 0 && isStartBitSent == false) // check if we must send start bit
-  {
-    digitalWrite(OUTPUT_PIN, HIGH);
-    isStartBitSent = true;
+    return sendStartBit(&flagEndOfMessage);
 
-    Serial.print("Sent start bit\n");
-    callIteration++;
-
-    return;
-  }
-
-  isStartBitSent = false;
-
-  sentSignal = (payloadToSend >> bitIndex) & 1; // what bit to send
-
-  digitalWrite(OUTPUT_PIN, sentSignal);
-
-  bitIndex = (bitIndex + 1) % (MESSAGE_BIT_LENGTH - 1);
-
-  // if we finished transferring the bits from the character flag it so we send start bit again when we send the next message
-  if (bitIndex == 0)
-    flagEndOfMessage = true;
-
-  // if (sentSignal)
-  //   Serial.print("Sending 1\n");
-  // else
-  //   Serial.print("Sending 0\n");
-
-  // if (flagEndOfMessage)
-  // Serial.print("****\n");
-
-  callIteration++;
+  return sendNextBit(&isStartBitSent, &bitIndex, &flagEndOfMessage);
 }
 
 void handleRx()
 {
-  static unsigned int numberOfBitsRead = 0;   // counts the number of bits read
-  static unsigned int samplingIteration = -1; // counts function calls
+  static unsigned int numberOfBitsRead = 0;  // counts the number of bits read
+  static unsigned int samplingIteration = 0; // counts function calls
 
   static char payloadRead = 0;
 
   static bool isStartBitReceived = false;
   static bool awaitEndBit = false;
 
-  samplingIteration = (samplingIteration + 1) % RECEIVE_SUBSAMPLING_RATIO;
+  samplingIteration++; // = (samplingIteration + 1) % RECEIVE_SUBSAMPLING_RATIO;
 
   receivedSignal = digitalRead(OUTPUT_PIN); // TODO make this IN
-  signalHistory[samplingIteration] = receivedSignal;
+  signalHistory[samplingIteration - 1] = receivedSignal;
 
   // Serial.print(samplingIteration);
   // Serial.print(" > ");
@@ -147,7 +156,7 @@ void handleRx()
   // }
   // Serial.print("\n");
 
-  if (samplingIteration < RECEIVE_SUBSAMPLING_RATIO - 1)
+  if (samplingIteration < RECEIVE_SUBSAMPLING_RATIO)
     return;
   else
     samplingIteration = 0;
