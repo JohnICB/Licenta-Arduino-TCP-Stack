@@ -1,15 +1,13 @@
 #define INPUT_PIN 7
 #define OUTPUT_PIN 13
-#define FREQUENCY_MS 200
+#define TASK_LENGTH_MS 100
 #define RECEIVE_SUBSAMPLING_RATIO 10
 #define MESSAGE_BIT_LENGTH 8
 
 const unsigned int decisiveBitPosition = floor((RECEIVE_SUBSAMPLING_RATIO * 80) / 100);
-const char payloadToSend = '*'; // d42	0b 0010 1010
+char payloadToSend = 'A'; // * d42	0b 0010 1010  --> 0101 0100
 
-bool isStartBitSent;   // make static
-bool receivedSignal;   // make static
-bool flagEndOfMessage; // make static
+String readBuffer;
 
 bool signalHistory[RECEIVE_SUBSAMPLING_RATIO];
 
@@ -25,10 +23,7 @@ void setup()
   pinMode(OUTPUT_PIN, OUTPUT);
   pinMode(INPUT_PIN, INPUT);
 
-  isStartBitSent = false;
-  flagEndOfMessage = false;
-
-  receivedSignal = 0;
+  readBuffer = String();
 
   for (int i = 0; i < RECEIVE_SUBSAMPLING_RATIO; i++)
     signalHistory[i] = 0;
@@ -36,56 +31,69 @@ void setup()
 
 void loop()
 {
+  static unsigned long startTime = millis();
   static unsigned long endTime = millis();
+  static float CPULoad = 0;
+
   const unsigned long currentTime = millis();
 
-  if (currentTime - endTime > FREQUENCY_MS)
+  if (currentTime - endTime > TASK_LENGTH_MS)
   {
     handleTx();
     handleRx();
     handleLogs();
 
+    startTime = currentTime;
     endTime = millis();
+    CPULoad = (endTime - startTime) / TASK_LENGTH_MS;
   }
 }
 
-void sendEndBit(int *iterationsToSkip)
+void sendEndBit(unsigned int *iterationsToSkip, bool *flagEndOfMessage)
 {
   digitalWrite(OUTPUT_PIN, HIGH);
 
   *iterationsToSkip = 5;
-  *flagEndOfMessage = true;
+  *flagEndOfMessage = false;
+
+  payloadToSend++;
+
+  if (payloadToSend > 140)
+    payloadToSend = 40;
 
   Serial.print("\nSent end bit\n");
+  Serial.print("Next is: ");
+  Serial.println(payloadToSend);
 }
 
-void sendStartBit(bool *flagEndOfMessage)
+void sendStartBit(bool *isStartBitSent)
 {
   digitalWrite(OUTPUT_PIN, HIGH);
+  *isStartBitSent = true;
 
   Serial.print("Sent start bit\n");
 }
 
 void sendNextBit(bool *isStartBitSent, unsigned int *bitIndex, bool *flagEndOfMessage)
 {
-  *isStartBitSent = false;
-
   const bool signalToSend = (payloadToSend >> *bitIndex) & 1; // what bit to send
 
-  digitalWrite(OUTPUT_PIN, signalToSend);
+  *bitIndex = *bitIndex + 1;
 
-  *bitIndex++; // = (*bitIndex + 1) % (MESSAGE_BIT_LENGTH - 1);
+  digitalWrite(OUTPUT_PIN, signalToSend);
 
   if (*bitIndex == MESSAGE_BIT_LENGTH)
   {
     *bitIndex = 0;
+
     *flagEndOfMessage = true; // if we finished transferring the bits from the character flag it so we send start bit again when we send the next message
+    *isStartBitSent = false;
   }
 
-  // if (signalToSend)
-  //   Serial.print("Sending 1\n");
-  // else
-  //   Serial.print("Sending 0\n");
+  if (signalToSend)
+    Serial.print("Sending 1\n");
+  else
+    Serial.print("Sending 0\n");
 
   // if (*flagEndOfMessage)
   // Serial.print("****\n");
@@ -97,6 +105,7 @@ void handleTx()
   static unsigned int bitIndex = 0;
   static unsigned int iterationsToSkip = 0;
 
+  static bool isStartBitSent = false;
   static bool flagEndOfMessage = false;
 
   callIteration++;
@@ -107,13 +116,10 @@ void handleTx()
   callIteration = 0;
 
   if (flagEndOfMessage)
-  {
-    flagEndOfMessage = false;
-    return sendEndBit(&iterationsToSkip);
-  }
+    return sendEndBit(&iterationsToSkip, &flagEndOfMessage);
 
   /* 
-   if (iterationsToSkip > 0)
+    if (iterationsToSkip > 0)
     // {
     //   digitalWrite(OUTPUT_PIN, LOW);
     //   iterationsToSkip--;
@@ -126,9 +132,58 @@ void handleTx()
   */
 
   if (bitIndex == 0 && isStartBitSent == false) // check if we must send start bit
-    return sendStartBit(&flagEndOfMessage);
+    return sendStartBit(&isStartBitSent);
 
-  return sendNextBit(&isStartBitSent, &bitIndex, &flagEndOfMessage);
+  sendNextBit(&isStartBitSent, &bitIndex, &flagEndOfMessage);
+}
+
+void awaitEndOfMessage(bool decisiveBit, char *outputByte, bool *isStartBitReceived, unsigned int *numberOfBitsRead, bool *awaitEndBit, bool *isSamplingStarted)
+{
+  if (!decisiveBit)
+    return;
+
+  Serial.print("\nReceived END bit\nMessage read:");
+  Serial.println(*outputByte, BIN);
+  Serial.println(*outputByte);
+
+  *outputByte = 0;
+  *isStartBitReceived = 0;
+  *numberOfBitsRead = 0;
+  *awaitEndBit = false;
+  *isSamplingStarted = false;
+}
+
+void awaitStartOfMessage(bool decisiveBit, bool *isStartBitReceived)
+{
+  if (decisiveBit)
+  {
+    *isStartBitReceived = true;
+    Serial.print("Received start bit\n");
+  }
+}
+
+void readBit(char *outputByte, bool decisiveBit, unsigned int *numberOfBitsRead, bool *awaitEndBit)
+{
+  static unsigned int bitIndex = 0;
+
+  *outputByte = (*outputByte) | (char)(decisiveBit << bitIndex++);
+
+  Serial.print(decisiveBit);
+  Serial.print(" -> rec -> now: ");
+
+  char temp = *outputByte;
+  Serial.println(temp, BIN);
+
+  *numberOfBitsRead = *numberOfBitsRead + 1;
+
+  if (*numberOfBitsRead == MESSAGE_BIT_LENGTH)
+  {
+    *awaitEndBit = true;
+    bitIndex = 0;
+
+    readBuffer += *outputByte;
+    Serial.println(readBuffer);
+  }
 }
 
 void handleRx()
@@ -136,14 +191,25 @@ void handleRx()
   static unsigned int numberOfBitsRead = 0;  // counts the number of bits read
   static unsigned int samplingIteration = 0; // counts function calls
 
-  static char payloadRead = 0;
+  static char outputByte = 0;
 
   static bool isStartBitReceived = false;
+  static bool isSamplingStarted = false;
   static bool awaitEndBit = false;
 
-  samplingIteration++; // = (samplingIteration + 1) % RECEIVE_SUBSAMPLING_RATIO;
+  const bool receivedSignal = digitalRead(INPUT_PIN); // TODO make this IN
 
-  receivedSignal = digitalRead(OUTPUT_PIN); // TODO make this IN
+  if (!isSamplingStarted)
+    if (receivedSignal)
+    {
+      isSamplingStarted = true;
+      samplingIteration = 0;
+    }
+    else
+      return;
+
+  samplingIteration++;
+
   signalHistory[samplingIteration - 1] = receivedSignal;
 
   // Serial.print(samplingIteration);
@@ -163,44 +229,13 @@ void handleRx()
 
   const bool decisiveBit = signalHistory[decisiveBitPosition];
 
-  Serial.print(decisiveBit);
-  Serial.print(" -> rec -> now: ");
-
   if (awaitEndBit)
-  {
-    if (!decisiveBit)
-      return;
-
-    Serial.print("\nReceived END bit\nMessage read:");
-    Serial.println(payloadRead, BIN);
-    Serial.println(payloadRead);
-
-    payloadRead = 0;
-    isStartBitReceived = 0;
-    numberOfBitsRead = 0;
-    awaitEndBit = false;
-
-    return;
-  }
+    return awaitEndOfMessage(decisiveBit, &outputByte, &isStartBitReceived, &numberOfBitsRead, &awaitEndBit, &isSamplingStarted);
 
   if (!isStartBitReceived)
-  {
-    if (decisiveBit)
-    {
-      isStartBitReceived = true;
-      Serial.print("Received start bit\n");
-    }
+    return awaitStartOfMessage(decisiveBit, &isStartBitReceived);
 
-    return;
-  }
-
-  payloadRead = (payloadRead << 1) | decisiveBit;
-  Serial.println(payloadRead, BIN);
-
-  numberOfBitsRead++;
-
-  if (numberOfBitsRead == MESSAGE_BIT_LENGTH)
-    awaitEndBit = true;
+  readBit(&outputByte, decisiveBit, &numberOfBitsRead, &awaitEndBit);
 
   // Serial.print("Has read bit ");
   // Serial.println(numberOfBitsRead);
